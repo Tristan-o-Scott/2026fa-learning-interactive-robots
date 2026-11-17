@@ -9,7 +9,9 @@ ready: false
 
 # Reporter team authors
 authors:
-  - name: "Reporter Team (Student Names)"
+  - name: "Huu Binh Ta"
+  - name: "Duc Anh Nguyen"
+  - name: "Tristan Scott"
 
 bibliography: 2026-11-23-safety-trust.bib
 
