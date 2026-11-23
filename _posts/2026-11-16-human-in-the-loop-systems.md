@@ -23,6 +23,13 @@ toc:
     - name: "Results"
     - name: "Limitations"
     - name: "Takeaways"
+  - name: "KnowNo"
+    subsections:
+    - name: "Method"
+    - name: "Experimental Setup"
+    - name: "Baselines"
+    - name: "Results"
+    - name: "Conclusions"
   - name: "Student Q&A"
 ---
 
@@ -77,6 +84,62 @@ In fact, this simply reuses the loss equation from earlier. The key idea is that
 
 ### Takeaways
 
+
+---
+
+## KnowNo: Robots That Ask For Help <d-cite key="ren_robots_2023"></d-cite> {#knowno}
+
+
+### Method
+
+KnowNo prompts the LLM to generate candidate next steps, formatted as multiple-choice question answering (MCQA) with options A–D and an added "E: an option not listed here" choice. The LLM's next-token probability for each letter serves as its confidence in that option.
+
+Using a calibration set of example scenarios, Conformal Prediction finds a confidence threshold that achieves a user-specified success level $1 - \epsilon$. At test time, every option scoring above the threshold goes into a *prediction set*:
+
+- If the set contains exactly one option, the robot executes it.
+- If the set contains more than one option, the robot asks the human to choose.
+
+### Experimental Setup
+
+Four environments spanning simulation, single-arm manipulation, mobile manipulation, and bimanual coordination:
+
+| Environment | Task | Ambiguity |
+|---|---|---|
+| **Simulation:** PyBullet Tabletop Rearrangement | A simulated robot arm rearranges colored blocks and bowls on a tabletop | Attribute, numeric, spatial |
+| **Hardware:** Multi-Step Tabletop Rearrangement (UR5 arm) | A physical UR5 arm with a suction gripper sorts 28 toy food items into blue and green plates based on human dietary preferences | Only a subset of preferences is given |
+| **Hardware:** Mobile Manipulator in an Office Kitchen | A mobile robot operates in an office kitchen with a countertop, drawers, a microwave, and waste bins | Spatial, safety |
+| **Hardware:** Bimanual Tabletop Manipulation (dual Kuka IIWA 7 arms) | Two arms with limited reachability must coordinate object handovers and bin sorting | Vague commands (e.g., which arm should act) |
+
+### Baselines
+
+KnowNo was primarily evaluated with PaLM-2L as the base planner, and compared against:
+
+| Baseline | Description |
+|---|---|
+| **Simple Set** | Adds options in order of LLM confidence until their total reaches $1 - \epsilon$, without calibration |
+| **Ensemble Set** | Same as Simple Set, but scores come from how often the LLM picks each option across 20 randomized prompts |
+| **Prompt Set** | Asks the LLM to list the prediction set directly |
+| **Binary** | Asks the LLM to say whether it is certain or uncertain |
+| **No Help** | Always executes the top-scoring option |
+
+### Results
+
+1. **Reliable task success guarantees.** In simulation, with a target success level of 85% ($\epsilon = 0.15$), KnowNo had the smallest deviation from the target across all three ambiguity settings. The uncalibrated baselines either missed the target or gave the user no way to set one.
+2. **Minimizing human help rate.** For the same success level, KnowNo asked for help less often than the baselines. The gap grew as instructions became more vague. Ensemble Set also performed well, but needed more inference time.
+3. **Quantitative hardware performance.** On the UR5, KnowNo reduced human help by 14% per step and 8% per trial compared to Simple Set. On the mobile manipulator, it reduced help by 14%. Overall, KnowNo reduced human help by 10–24% compared to the baselines.
+4. **Ablation on scoring functions.** Replacing the MCQA letter scores with sentence-level scores (raw sentence probability or perplexity) made performance worse, especially when candidate options varied a lot in length. Scoring a single letter avoids this length bias.
+
+### Conclusions
+
+Conformal prediction paired with MCQA allows operators to tune a statistical guarantee on task completion, while keeping human help to a minimum. KnowNo works with off-the-shelf LLMs without fine-tuning.
+
+The key limitation is that the guarantee currently assumes:
+
+- 1. the environment's scene state is accurately parsed into text.
+- 2. low-level robotic controllers execute the selected primitive without failure.
+- 3. a clean environment, that is, the method does not account for human error, so a wrong answer from the human breaks the guarantee.
+
+In addition, calibration requires a labeled dataset of scenarios. The authors used 400 examples, which took about 4 hours to label in the multi-step setting, and this must be repeated for each new environment.
 
 ---
 
