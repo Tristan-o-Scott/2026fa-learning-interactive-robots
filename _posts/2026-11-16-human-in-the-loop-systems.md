@@ -72,11 +72,295 @@ In fact, this simply reuses the loss equation from earlier. The key idea is that
 
 ### Results
 
+#### What We Are Testing
+
+**Robot-gated DAgger** lets the robot decide when to ask an expert for help. This only works if the robot can tell when it is in trouble.
+
+Diff-DAgger does this with one trick. A diffusion policy is trained to predict noise. At rollout time, we reuse that same training loss to score the action the robot just generated. A high loss means "this looks unlike my training data."
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig1_overview.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 1 (paper Fig. 1): Overview of Diff-DAgger. (a) A diffusion policy is trained on expert data. (b) During rollout, the robot generates an action, computes the diffusion loss on it, and continues only if the loss is low. Otherwise the expert takes over."
+%}
+
+The loss comes from the standard diffusion policy objective:
+
+$$
+\mathcal{L}_\pi(o, a, \epsilon, t) = \left\| f(\epsilon, a, t) - f_\theta\!\left(o,\ \sqrt{\alpha_t}\,a + \sqrt{1-\alpha_t}\,\epsilon,\ t\right) \right\|^2
+$$
+
+Here $o$ is the observation, $a$ is the action sequence, $\epsilon$ is Gaussian noise, and $t$ is the denoising step. Because $\epsilon$ and $t$ are random, the paper averages the loss over a batch of $N_b$ samples:
+
+$$
+\bar{\mathcal{L}}(o, a, \pi) = \mathbb{E}_{\epsilon \sim \mathcal{N}(0, I),\; t \sim \mu(1, T)} \; \mathcal{L}_\pi(o, a, \epsilon, t)
+$$
+
+The decision rule has two knobs:
+
+- $\alpha$ is a quantile. We compute $\bar{\mathcal{L}}$ on every training pair. The $\alpha$-quantile of those values is the threshold.
+- $K$ is the patience. The expert takes over only if the loss exceeds the threshold for $K$ timesteps in a row.
+
+$$
+\text{query at step } s \iff \bar{\mathcal{L}}(o_\tau, a_\tau, \pi) > q_\alpha \quad \text{for all } \tau \in \{s-K+1, \dots, s\}
+$$
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/decision_rule.svg"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 2: The query rule in action (our own diagram). One noisy spike is ignored. Two high-loss steps in a row, with K = 2, hand control to the expert."
+%}
+
+The experiments ask three questions:
+
+1. **RQ1.** Can diffusion loss predict task failure?
+2. **RQ2.** With the same number of expert interventions, does Diff-DAgger beat existing methods?
+3. **RQ3.** Does it cut the wall-clock time of each DAgger iteration?
+
+### Tasks and Experts
+
+There are three simulated tasks (built on ManiSkill) and two real-world tasks.
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig3_tasks.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 3 (paper Fig. 3): The five tasks. Top: stacking, pushing, and plugging in simulation. Bottom: stacking and loading on a real Franka robot."
+%}
+
+- **Stacking.** Pick up a red cube and place it on a green cube. A basic perception and manipulation test.
+- **Pushing.** Use a stick to push a red T-shaped block to a target pose. This is contact-rich and needs multimodal planning.
+- **Plugging.** Insert a charger into a receptacle. This needs fine alignment.
+- **Loading (real).** Pick up soft bread and place it on a toaster. This tests handling deformable objects.
+
+The simulated experts were designed on purpose. Stacking and plugging use a rule-based RRT motion planner, which plans over a long horizon. Pushing uses **two RL agents** trained with PPO. One is rewarded for rotating the object clockwise. The other is rewarded for counter-clockwise. They alternate when giving demonstrations, so the data truly has two modes for the same state. The authors also test learning from the counter-clockwise agent alone.
+
+The real-world experts are humans teleoperating a robot with a VR controller.
+
+| Type | Task | # Obj | # Cams | Contact rich | High precision | Time limit | Expert | Avg. expert duration | Expert success |
+|---|---|---|---|---|---|---|---|---|---|
+| Sim | Stacking | 2 | 3 | No | No | 250 | Motion planner | 60.3 | 1.00 |
+| Sim | Pushing | 1 | 1 | Yes | No | 250 | RL agent | 65.7 | 0.93 |
+| Sim | Plugging | 2 | 3 | No | Yes | 500 | Motion planner | 147 | 0.98 |
+| Real | Stacking | 2 | 3 | No | No | 600 | Human | 174.2 | 1.00 |
+| Real | Loading | 2 | 3 | Yes | Yes | 600 | Human | 210.5 | 1.00 |
+
+*Table 1 (paper Table I): Task and expert summary. Time limits are in timesteps, at 20 Hz in simulation and 30 Hz in the real world.*
+
+#### Observations, Models, and Baselines
+
+**Cameras.** Pick-and-place tasks use three cameras (left, right, in-hand) to avoid occlusion. Pushing uses one top-down camera. The real robot is a Franka Research 3 with three RealSense D435 cameras.
+
+**Model.** All methods use the same diffusion policy: a U-Net head with FiLM conditioning. The paper tests two input types:
+
+- **State-based.** Robot joint positions, end-effector pose, and the true object poses.
+- **Image-based.** An R3M ResNet18 encoder with spatial softmax, plus proprioception. Random crop augmentation is used.
+
+The observation horizon is set to one to keep batches small. The diffusion model uses V-objective prediction (more on this in the discussion).
+
+| Task | Action space | Initial demos | Final demos | New demos per update | $\alpha$ | $K$ | $N_b$ |
+|---|---|---|---|---|---|---|---|
+| Stacking (sim) | Abs. pose | 20 | 60 | 4 | 0.99 | 2 | 512 |
+| Pushing (1 expert) | Rel. joint | 20 | 100 | 4 | 0.99 | 1 | 512 |
+| Pushing (2 experts) | Rel. joint | 20 | 100 | 4 | 0.9 | 2 | 512 |
+| Plugging | Abs. pose | 20 | 100 | 8 | 0.99 | 2 | 512 |
+| Stacking (real) | Abs. pose | 40 | 120 | 20 | 0.99 | 2 | 512 |
+| Loading (real) | Abs. pose | 40 | 120 | 20 | 0.99 | 2 | 512 |
+
+*Table 2 (paper Table IV, trimmed to the DAgger columns): Key hyperparameters.*
+
+**Baselines.** Three comparisons, all using the same diffusion policy so expressiveness is equal:
+
+- **Behavior Cloning (BC).** Train once on offline demonstrations.
+- **Ensemble-DAgger.** Five policies. Their disagreement (action variance) measures uncertainty.
+- **ThriftyDAgger.** A strong robot-gated method. It adds a learned risk estimate on top of the ensemble.
+
+#### RQ1: Can Diffusion Loss Predict Task Failure?
+
+##### Why Ensembles Struggle: A Toy Example
+
+Before the robot tasks, the paper uses a 2D navigation problem. An agent goes from start to goal around a circle. It can go clockwise or counter-clockwise. Both are correct, so the data has two modes.
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig2_toy_example.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 4 (paper Fig. 2): (a) The toy problem. Red/orange dots are the two modes. Green marks the fork where the paths split. The dark blue area is out-of-distribution. (b) Left: action standard deviation across the ensemble. Right: diffusion loss. Both measured over 100 runs."
+%}
+
+Look at the left chart. The ensemble's disagreement is highest at the **fork**, which is a normal, in-distribution spot. It is even a bit higher than in the truly out-of-distribution region. Each policy is confident, they just pick different paths. The ensemble reads that as uncertainty.
+
+Now the right chart. Diffusion loss is low and nearly equal for the single-mode region and the fork. It jumps only in the out-of-distribution region. That is exactly the behavior we want.
+
+##### The Evaluation Setup
+
+For each task, the policy is trained on enough demos to land near a **50% success rate**. Then it runs 100 random episodes with no expert help. For each episode, we record two things: did the task fail, and did the robot ask for help? All methods use the same $\alpha$ and $K$.
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/confusion_matrix.svg"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 5: How query decisions line up with outcomes (our own diagram)."
+%}
+We then report standard scores:
+
+$$
+\text{TPR} = \frac{TP}{TP + FN}, \qquad \text{TNR} = \frac{TN}{TN + FP}, \qquad F_1 = \frac{2\,TP}{2\,TP + FP + FN}, \qquad \text{Acc} = \frac{TP + TN}{TP + TN + FP + FN}
+$$
+
+TPR is the share of failing episodes where the robot asked for help. TNR is the share of successful episodes where it stayed independent.
+
+##### Results
+
+| Task | Demos | Method | TPR | TNR | F1 | Acc |
+|---|---|---|---|---|---|---|
+| Stacking | 30 | **Ours** | 0.88 | 0.77 | **0.83** | **0.84** |
+| | | Ensemble-DA | 0.81 | 0.31 | 0.52 | 0.59 |
+| | | Thrifty-DA | 0.95 | 0.21 | 0.54 | 0.65 |
+| Pushing (1 expert) | 40 | **Ours** | 0.83 | 0.92 | **0.88** | **0.85** |
+| | | Ensemble-DA | 1.00 | 0.11 | 0.60 | 0.73 |
+| | | Thrifty-DA | 1.00 | 0.02 | 0.57 | 0.72 |
+| Pushing (2 experts) | 25/25 | **Ours** | 1.00 | 0.52 | **0.77** | **0.82** |
+| | | Ensemble-DA | 0.29 | 0.90 | 0.58 | 0.42 |
+| | | Thrifty-DA | 0.58 | 0.66 | 0.62 | 0.62 |
+| Plugging | 100 | **Ours** | 0.68 | 0.82 | **0.75** | **0.73** |
+| | | Ensemble-DA | 0.22 | 0.27 | 0.14 | 0.37 |
+| | | Thrifty-DA | 0.26 | 0.31 | 0.22 | 0.21 |
+
+*Table 3 (paper Table II): Query decisions versus task outcomes over 100 rollouts, visuomotor tasks.*
+
+Diff-DAgger has the best F1 and accuracy on every task. The paper reports averages across the simulated visuomotor tasks:
+
+- Against Ensemble-DAgger: **+42.7% F1** and **+38.4% accuracy**.
+- Against ThriftyDAgger: **+22.6% F1** and **+32.8% accuracy**.
+- Across all tasks, the abstract summarizes this as a **39.0%** gain in failure prediction.
+
+Notice the pattern in the baselines. Ensemble-DAgger and ThriftyDAgger often have a TPR of 1.00 but a TNR near zero on single-expert pushing. They ask for help almost every time. On two-expert pushing, the picture flips for Ensemble-DAgger: a TPR of 0.29 means it misses most failures.
+
+**Videos.** The authors' project page shows diffusion-loss behavior on two tasks. (We link them rather than copy them.)
+
+<video controls width="100%" src="https://diffdagger.github.io/static/videos/stack_dloss.mp4"></video>
+
+*Video 1: Stacking with diffusion loss ([source](https://diffdagger.github.io/static/videos/stack_dloss.mp4), project page).*
+
+<video controls width="100%" src="https://diffdagger.github.io/static/videos/push_dloss.mp4"></video>
+
+*Video 2: Pushing with diffusion loss ([source](https://diffdagger.github.io/static/videos/push_dloss.mp4), project page).*
+
+#### RQ2: Does the Collected Data Make a Better Policy?
+
+Here every method gets the **same number of expert demonstrations**. We then train a final policy on the collected data and measure success rate. Simulation uses 100 evaluation episodes. Real-world tasks use 20.
+
+| | Stack (sim) | | Push (1 exp.) | | Push (2 exp.) | | Plug | | Stack (real) | Load (real) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| | State | Image | State | Image | State | Image | State | Image | Image | Image |
+| BC | 0.89 | 0.85 | 0.89 | 0.72 | 0.74 | 0.71 | 0.75 | 0.49 | 0.60 | 0.80 |
+| Ensemble-DA | 0.72 | 0.83 | 0.87 | 0.81 | 0.70 | 0.59 | 0.69 | 0.37 | – | – |
+| Thrifty-DA | 0.79 | 0.86 | 0.85 | 0.81 | 0.69 | 0.68 | 0.65 | 0.47 | – | – |
+| **Ours** | **0.94** | **0.94** | **0.96** | **0.87** | **0.87** | **0.79** | **0.92** | **0.84** | **0.80** | **0.95** |
+
+*Table 4 (paper Table III): Success rate after the final DAgger iteration. Ensemble and Thrifty were not run on the real robot.*
+
+Three things stand out:
+
+- **Diff-DAgger wins every column.** On average it gains 13.7% over the second-best method in state-based tasks. In visuomotor tasks, including real-world ones, the average gain is 25.2%. (The introduction reports 20.6% overall.)
+- **The baselines can lose to plain behavior cloning.** Stacking from state: BC gets 0.89, Ensemble-DAgger 0.72. Plugging from images: BC 0.49, Ensemble-DAgger 0.37. Interactive data was worse than offline data.
+- **It works on real hardware.** Real stacking goes from 0.60 (BC) to 0.80. Loading goes from 0.80 to 0.95.
+
+The authors' real-world demonstration video is on the project page:
+
+<video controls width="100%" src="https://diffdagger.github.io/static/videos/real_world.mp4"></video>
+
+*Video 3: Real-world demonstration ([source](https://diffdagger.github.io/static/videos/real_world.mp4), project page).*
+
+#### RQ3: Is It Faster?
+
+Yes. The Ensemble approach pays three costs that Diff-DAgger avoids:
+
+1. **Training.** Five policies must be trained. Diff-DAgger trains one.
+2. **Threshold setting.** Ensemble methods run full ensemble inference on the entire training set. Diff-DAgger passes a single batch per data point.
+3. **Inference.** Five forward passes versus one.
+
+{% include figure.liquid
+   path="assets/img/2026-11-18-diff-dagger/fig4_wallclock.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 6 (paper Fig. 4): Average duration of training, threshold setting, inference, and total iteration. Measured on the final DAgger iteration of the visuomotor pushing task, on one A100 40 GB GPU."
+%}
+
+| Speedup of Diff-DAgger over | Training | Threshold setting | Inference |
+|---|---|---|---|
+| Ensemble-DAgger | 5.1× | 48× | 3.8× |
+| ThriftyDAgger | 6.4× | 53× | 3.9× |
+
+Overall, the policy update time drops by a factor of **7.8** versus Ensemble-DAgger. A full update takes only about **0.54 hours**. ThriftyDAgger is slower still, because it collects extra data and trains a separate risk estimator.
+
+
+#### False Positives vs. False Negatives
+
+The two kinds of query mistakes do not cost the same.
+
+- A **false positive** means the robot asks for help it did not need. You lose some of the benefit of interactive learning. In the worst case, you are just doing offline imitation.
+- A **false negative** is worse. The robot is overconfident and fails. It then drifts into states far from the useful data.
+
+Ensemble-DAgger and ThriftyDAgger both make many false negatives, especially with two pushing experts. The authors' guess: the training data already has high action variance, because the two experts disagree in the same state. That makes the ensemble numb to *real* out-of-distribution states. The authors also suspect this is why those baselines sometimes fall below behavior cloning. (This is a speculation in the paper, not a tested claim.)
+
+Diff-DAgger has far fewer false negatives across tasks. That is the better trade for interactive learning with messy, multimodal data.
+
+#### Seeing the Difference: The Plugging Task
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig5_query_modes.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 7 (paper Fig. 5): Query behavior on plugging. Black = robot rollout, red = robot queries, green = expert intervenes, magenta = automatic timeout intervention."
+%}
+
+- **Diff-DAgger (top).** The charger starts to slip, and the robot asks for help at 9.1 s. The expert steps in and the episode succeeds.
+- **ThriftyDAgger (middle).** The robot keeps trying after the slip. It only asks at 14.7 s, after dropping the charger.
+- **Ensemble-DAgger (bottom).** The robot makes no progress and never asks. It times out at 25.0 s, and the system forces an expert in.
+
+The authors' plugging video is here:
+
+<video controls width="100%" src="https://diffdagger.github.io/static/videos/plug_desc.mp4"></video>
+
+*Video 4: Plugging ([source](https://diffdagger.github.io/static/videos/plug_desc.mp4), project page).*
+
+#### Choosing the Prediction Target
+
+Diffusion models can be trained to predict different targets: the noise $\epsilon$, the clean sample, or a "velocity" (V-objective). The paper notes that this choice affects both convergence speed and final performance. They found that **sample** and **V-objective** prediction converge faster than epsilon. They use V-objective everywhere, since it balances convergence and performance.
+
+#### An Unexpected Bonus: Recovery Behavior
+
+{% include figure.liquid
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig6_recovery.png"
+   class="img-fluid rounded z-depth-1"
+   caption="Figure 8 (paper Fig. 6): A policy trained on Diff-DAgger data. After a failed first attempt, it tries again and stacks the cube. Top: simulation. Bottom: real robot."
+%}
+
+![Test image](../assets/img/2026-11-16-human-in-the-loop-systems/fig1_overview.png)
+
+Policies trained on Diff-DAgger data sometimes recover from their own mistakes. The robot misaligns the cube, fails, tries again, and succeeds. This kind of behavior usually shows up only if someone carefully plans recoveries into offline data. Here it appears naturally. The authors link it to the policy-performance gain over offline training. The mechanism makes sense: the expert steps in right at the moments of trouble, so the dataset ends up full of "how to fix it" examples.
+
 
 ### Limitations
 
+**Stated by the authors:**
+
+1. **Diffusion policies are still slow to train.** Diff-DAgger removes the ensemble cost, but a diffusion policy takes longer to train than a simpler policy class. The authors hope faster computing will ease this.
+2. **Speed was bought with trade-offs.** Many choices that speed up training (such as a one-step observation horizon) cost some policy performance. The authors plan to look at this in future work.
+
+**Our reading of what remains open** (not claims from the paper):
+
+1. **Thresholds are set by hand.** $\alpha$ and $K$ differ by task (for example, 0.9 for two-expert pushing and 0.99 elsewhere). Picking them well may need tuning.
+2. **Strong baselines in the real world are missing.** Ensemble-DAgger and ThriftyDAgger were only run in simulation (Table 4), so real-world comparisons are against BC alone.
+
 ### Takeaways
 
+
+Diff-DAgger is a robot-gated DAgger method that reuses a diffusion policy's own training loss as an uncertainty signal. In the paper's experiments:
+
+- It predicts task failure better than Ensemble-DAgger and ThriftyDAgger.
+- It handles multimodal demonstrations, where ensemble disagreement gets confused.
+- Its collected data trains better policies, in simulation and on a real Franka robot.
+- It cuts wall-clock time per policy update by 7.8× versus Ensemble-DAgger.
+
+The core idea is simple. A model trained to denoise expert actions is naturally surprised by actions unlike the expert data. That surprise is a cheap and well-behaved query signal.
 
 ---
 
@@ -90,3 +374,10 @@ In fact, this simply reuses the loss equation from earlier. The key idea is that
 
 A: Answer.
 <br><br>
+
+
+
+### Sources
+
+- Lee, Kang, Kuo. *Diff-DAgger: Uncertainty Estimation with Diffusion Policy for Robotic Manipulation.* ICRA 2025. [arXiv:2410.14868](https://arxiv.org/abs/2410.14868)
+- Project page and videos: [diffdagger.github.io](https://diffdagger.github.io)
