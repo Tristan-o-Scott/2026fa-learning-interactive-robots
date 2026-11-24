@@ -1,7 +1,7 @@
 ---
 layout: distill
 title: "Human-in-the-loop Systems"
-description: "Interactive reinforcement learning, human feedback loops, and human-in-the-loop cyber-physical robotic systems."
+description: "When should a robot ask a person for help? We cover Diff-DAgger, which uses diffusion loss to decide when an expert should take over, and KnowNo, which uses conformal prediction to decide when an LLM planner should ask for clarification."
 date: 2026-11-16
 future: true
 htmlwidgets: true
@@ -15,6 +15,8 @@ bibliography: 2026-11-16-human-in-the-loop-systems.bib
 
 toc:
   - name: "Introduction"
+    subsections:
+    - name: "Overview of Papers"
   - name: "Diff-DAgger"
     subsections:
     - name: "Motivation and Background"
@@ -35,6 +37,34 @@ toc:
 
 ## Introduction
 
+This lecture report covers the **Human-in-the-loop Systems** session in *Learning for Interactive Robots (CS 6501, Fall 2026)* at the University of Virginia.
+
+**The main question:** When should a robot stop and ask a person for help?
+
+Most robot learning puts the human at the start of the pipeline. People collect demonstrations or design a reward function, the robot trains, and after that the robot is on its own. A human-in-the-loop system keeps a person involved while the robot is actually running. That person might take over the controls, correct a mistake, or answer a question. Any of these makes the robot more reliable, and any of them costs the person time and attention.
+
+That trade-off is the main design problem. A robot that asks too rarely fails in situations it was never trained for. A robot that asks too often isn't saving anyone any work, since the person might as well do the task themselves. Striking the balance depends on the robot having a decent sense of its own uncertainty, which is hard for the large learned models robots use today. Diffusion policies and LLM planners can both be confidently wrong.
+
+### Overview of Papers
+
+Both papers in this report are robot-gated, meaning the robot decides on its own when to ask for help. They differ in what kind of help the robot asks for and in how it measures its own uncertainty.
+
+**Diff-DAgger** <d-cite key="lee_diff-dagger_2025"></d-cite> works at the level of motor control. A diffusion policy uses its own training loss to notice when its actions have drifted away from the expert data, then hands control to an expert who shows it what to do. Those corrections go into the dataset, and the policy is retrained on the bigger dataset before the next round.
+
+**KnowNo** <d-cite key="ren_robots_2023"></d-cite> works at the level of task planning. An LLM planner writes out its possible next steps as a multiple-choice question and uses conformal prediction to figure out which options it can't rule out. If more than one is left, it asks the human to pick. The LLM is never retrained. What the user gets instead is a statistical guarantee on how often the task succeeds.
+
+| | Diff-DAgger | KnowNo |
+|---|---|---|
+| **Level** | Low-level control | High-level planning |
+| **Uncertainty signal** | Diffusion loss on the robot's own action | LLM confidence in each multiple-choice option |
+| **When the robot asks** | Loss stays above a threshold for $K$ steps in a row | More than one option survives conformal prediction |
+| **What the human does** | Takes over and demonstrates | Picks the correct option |
+| **What the help is used for** | Training data for the next DAgger round | Finishing the current task |
+| **Guarantee** | None, results are empirical | Task success of at least $1 - \epsilon$ |
+
+*Table 1: The two papers side by side.*
+
+Between them, the two papers cover two different reasons a robot might need a person. Diff-DAgger asks for help when the robot's actions stop looking like the expert's, and KnowNo asks when the robot can't tell what the person meant.
 
 ---
 
@@ -152,7 +182,7 @@ The real-world experts are humans teleoperating a robot with a VR controller.
 | Real | Stacking | 2 | 3 | No | No | 600 | Human | 174.2 | 1.00 |
 | Real | Loading | 2 | 3 | Yes | Yes | 600 | Human | 210.5 | 1.00 |
 
-*Table 1 (paper Table I): Task and expert summary. Time limits are in timesteps, at 20 Hz in simulation and 30 Hz in the real world.*
+*Table 2 (paper Table I): Task and expert summary. Time limits are in timesteps, at 20 Hz in simulation and 30 Hz in the real world.*
 
 #### Observations, Models, and Baselines
 
@@ -174,7 +204,7 @@ The observation horizon is set to one to keep batches small. The diffusion model
 | Stacking (real) | Abs. pose | 40 | 120 | 20 | 0.99 | 2 | 512 |
 | Loading (real) | Abs. pose | 40 | 120 | 20 | 0.99 | 2 | 512 |
 
-*Table 2 (paper Table IV, trimmed to the DAgger columns): Key hyperparameters.*
+*Table 3 (paper Table IV, trimmed to the DAgger columns): Key hyperparameters.*
 
 **Baselines.** Three comparisons, all using the same diffusion policy so expressiveness is equal:
 
@@ -232,7 +262,7 @@ TPR is the share of failing episodes where the robot asked for help. TNR is the 
 | | | Ensemble-DA | 0.22 | 0.27 | 0.14 | 0.37 |
 | | | Thrifty-DA | 0.26 | 0.31 | 0.22 | 0.21 |
 
-*Table 3 (paper Table II): Query decisions versus task outcomes over 100 rollouts, visuomotor tasks.*
+*Table 4 (paper Table II): Query decisions versus task outcomes over 100 rollouts, visuomotor tasks.*
 
 Diff-DAgger has the best F1 and accuracy on every task. The paper reports averages across the simulated visuomotor tasks:
 
@@ -264,7 +294,7 @@ Here every method gets the **same number of expert demonstrations**. We then tra
 | Thrifty-DA | 0.79 | 0.86 | 0.85 | 0.81 | 0.69 | 0.68 | 0.65 | 0.47 | – | – |
 | **Ours** | **0.94** | **0.94** | **0.96** | **0.87** | **0.87** | **0.79** | **0.92** | **0.84** | **0.80** | **0.95** |
 
-*Table 4 (paper Table III): Success rate after the final DAgger iteration. Ensemble and Thrifty were not run on the real robot.*
+*Table 5 (paper Table III): Success rate after the final DAgger iteration. Ensemble and Thrifty were not run on the real robot.*
 
 Three things stand out:
 
@@ -354,7 +384,7 @@ Policies trained on Diff-DAgger data sometimes recover from their own mistakes. 
 **Our reading of what remains open** (not claims from the paper):
 
 1. **Thresholds are set by hand.** $\alpha$ and $K$ differ by task (for example, 0.9 for two-expert pushing and 0.99 elsewhere). Picking them well may need tuning.
-2. **Strong baselines in the real world are missing.** Ensemble-DAgger and ThriftyDAgger were only run in simulation (Table 4), so real-world comparisons are against BC alone.
+2. **Strong baselines in the real world are missing.** Ensemble-DAgger and ThriftyDAgger were only run in simulation (Table 5), so real-world comparisons are against BC alone.
 
 ### Takeaways
 
@@ -411,7 +441,7 @@ KnowNo gets around this with a multiple-choice trick. KnowNo prompts the LLM to 
 | D | Put the metal bowl in the sink | 0.03 |
 | E | An option not listed here | 0.02 |
 
-*Table 5: MCQA scores for "put the bowl in the microwave" (made-up numbers for illustration, not from the paper).*
+*Table 6: MCQA scores for "put the bowl in the microwave" (made-up numbers for illustration, not from the paper).*
 
 The LLM leans toward A, but only slightly. Picking the top option here is close to a coin flip between the two bowls. The next step decides whether a lean like that is good enough to act on.
 
@@ -548,3 +578,5 @@ A: Uncertainty can mean a lot of things, such as unsafe or unwanted actions. The
 
 - Lee, Kang, Kuo. *Diff-DAgger: Uncertainty Estimation with Diffusion Policy for Robotic Manipulation.* ICRA 2025. [arXiv:2410.14868](https://arxiv.org/abs/2410.14868)
 - Project page and videos: [diffdagger.github.io](https://diffdagger.github.io)
+- Ren et al. *Robots That Ask For Help: Uncertainty Alignment for Large Language Model Planners.* CoRL 2023. [arXiv:2307.01928](https://arxiv.org/abs/2307.01928)
+- Project page: [robot-help.github.io](https://robot-help.github.io)
