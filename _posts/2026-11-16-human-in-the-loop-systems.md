@@ -24,6 +24,7 @@ toc:
     - name: "Takeaways"
   - name: "KnowNo"
     subsections:
+    - name: "Related Work"
     - name: "How KnowNo Works"
     - name: "Experimental Setup"
     - name: "Baselines"
@@ -371,15 +372,95 @@ The core idea is simple. A model trained to denoise expert actions is naturally 
 
 ## KnowNo: Robots That Ask For Help <d-cite key="ren_robots_2023"></d-cite> {#knowno}
 
+Say you ask a kitchen robot to "put the bowl in the microwave." There are two bowls on the counter, one plastic and one metal. The robot's language model planner reads the instruction, picks the metal bowl with total confidence, and puts it in the microwave. Now there are sparks coming out of the microwave, and the robot is waiting for its next instruction.
+
+As far as the planner could tell, the plan was fine. The problem is that the instruction was ambiguous, and nothing in the planner was built to notice that. Large language models (LLMs) are good at turning instructions into step-by-step plans, but they also hallucinate: they give answers that sound reasonable, are wrong, and come with high confidence. Instructions from people make this worse, since we leave out details all the time, sometimes on purpose and sometimes without realizing it.
+
+<d-cite key="ren_robots_2023"></d-cite> propose KnowNo ("Know When You Don't Know"), a way for an LLM planner to figure out when it should stop and ask a person for help. Like the robot-gated DAgger methods above, the robot is the one deciding when a human gets involved. What changes is the kind of help. In Diff-DAgger, the expert takes over the low-level controls. In KnowNo, the human answers a question about the plan ("Which bowl did you mean?") and the robot keeps going on its own.
+
+The authors call their goal *uncertainty alignment*, which has two parts:
+
+1. **Calibrated confidence.** The user picks a success rate $1 - \epsilon$, and the robot asks for enough help to reach it, with a statistical guarantee.
+2. **Minimal help.** Out of all the ways to reach that success rate, the robot should ask as few questions as possible.
+
+A robot that asks about everything meets the first goal and misses the second. A robot that never asks misses the first. KnowNo uses conformal prediction to balance the two.
+
+### Related Work
+
+| Area | What prior work does | Where KnowNo differs |
+|---|---|---|
+| **LLM planners** | SayCan <d-cite key="ahn_saycan_2022"></d-cite> and similar systems turn language instructions into multi-step robot plans. | These planners have no way to ask for clarification. When the instruction is ambiguous, they guess. |
+| **Asking through prompting** | Inner Monologue <d-cite key="huang_inner_2022"></d-cite> feeds scene descriptions and human feedback back into the prompt, which lets the LLM ask questions. | Getting the robot to ask the right amount takes a lot of prompt engineering, and there is no way to know ahead of time how often the robot will succeed. |
+| **Uncertainty estimates for LLMs** | Many papers try to calibrate an LLM's confidence in a single answer. | A calibrated score for one answer still doesn't tell the robot which other answers to consider. Conformal methods return a set of answers with a coverage guarantee instead. |
+| **Conformal prediction for LLMs** | <d-cite key="kumar_conformal_2023"></d-cite> apply conformal prediction to multiple-choice question answering. | That work assumes the answer options are given. KnowNo has the LLM write its own options, so it works for open-ended planning. |
+| **Conformal prediction in robotics** | Earlier robotics work uses conformal prediction for fault detection, trajectory prediction, and planning around moving obstacles. | Those guarantees either hold on average at each step or are very conservative. KnowNo calibrates over entire plans, so the guarantee covers the whole task even though each action changes what the robot sees next. |
 
 ### How KnowNo Works
 
-KnowNo prompts the LLM to generate candidate next steps, formatted as multiple-choice question answering (MCQA) with options A–D and an added "E: an option not listed here" choice. The LLM's next-token probability for each letter serves as its confidence in that option.
+#### Step 1: Planning as Multiple Choice
 
-Using a calibration set of example scenarios, Conformal Prediction finds a confidence threshold that achieves a user-specified success level $1 - \epsilon$. At test time, every option scoring above the threshold goes into a *prediction set*:
+The obvious way to measure an LLM's confidence in a plan step $y$ is the probability it assigns to the whole sentence, $p(y)=\prod_{i=1}^{k}p(\sigma_i \mid \sigma_1,\dots,\sigma_{i-1})$, where $\sigma_1, \dots, \sigma_k$ are the tokens in the step. The trouble is that this product shrinks as the sentence gets longer. "Put the plastic bowl in the microwave" scores lower than "put bowl in microwave" for reasons that have nothing to do with which one is correct.
+
+KnowNo gets around this with a multiple-choice trick. KnowNo prompts the LLM to generate candidate next steps, formatted as multiple-choice question answering (MCQA) with options A–D and an added "E: an option not listed here" choice. The prompt includes a text description of the scene (from an object detector, or given directly), the user's instruction, and a few example options from other scenarios. The LLM is then asked which option is correct. The LLM's next-token probability for each letter serves as its confidence in that option. We write this score as $\hat{f}(x)_y$, the confidence in label $y \in \mathcal{Y} = \{A, B, C, D, E\}$ given the prompt $x$. Every option is now a single token, so length stops mattering.
+
+| Option | Plan | Score $\hat{f}(x)_y$ |
+|---|---|---|
+| A | Put the plastic bowl in the microwave | 0.46 |
+| B | Put the metal bowl in the microwave | 0.41 |
+| C | Put the plastic bowl in the sink | 0.08 |
+| D | Put the metal bowl in the sink | 0.03 |
+| E | An option not listed here | 0.02 |
+
+*Table 5: MCQA scores for "put the bowl in the microwave" (made-up numbers for illustration, not from the paper).*
+
+The LLM leans toward A, but only slightly. Picking the top option here is close to a coin flip between the two bowls. The next step decides whether a lean like that is good enough to act on.
+
+#### Step 2: Conformal Prediction
+
+Using a calibration set of example scenarios, conformal prediction finds a confidence threshold that achieves a user-specified success level $1 - \epsilon$. In more detail:
+
+1. Collect $N$ example scenarios and label the correct option for each one. The paper uses $N = 400$.
+2. For each scenario, compute the nonconformity score $\kappa_i = 1 - \hat{f}(x_i)_{y_i}$. This is one minus the LLM's confidence in the *correct* answer, so a high $\kappa_i$ means the right answer surprised the LLM.
+3. Set $\hat{q}$ to the $\frac{\lceil (N+1)(1-\epsilon) \rceil}{N}$ empirical quantile of $\kappa_1, \dots, \kappa_N$.
+
+At test time, every option scoring above the threshold goes into a *prediction set*:
+
+$$
+C(x_{\text{test}}) = \{\, y \in \mathcal{Y} : \hat{f}(x_{\text{test}})_y \geq 1 - \hat{q} \,\}
+$$
+
+Conformal prediction guarantees that the correct option lands in this set with probability at least $1 - \epsilon$:
+
+$$
+\mathbb{P}\big(y_{\text{test}} \in C(x_{\text{test}})\big) \geq 1 - \epsilon
+$$
+
+The intuition is that $\hat{q}$ is picked so that in roughly $1 - \epsilon$ of the calibration scenarios, the correct answer scored at least $1 - \hat{q}$. A new scenario comes from the same distribution, so its correct answer should clear the same bar just as often. This holds whether or not the LLM's scores are any good. A poorly calibrated LLM just ends up with bigger sets, which means more questions. If the scores do match the true probabilities, the sets are also the smallest possible for that success level, which is where the minimal help goal comes in.
+
+One detail: the guarantee above is an average over random draws of the calibration set. The paper uses a stronger version that holds for the specific calibration set you collected (with probability $1 - \delta = 0.99$), so the robot doesn't need a fresh calibration set for every new task.
+
+Back to the example: if calibration gave a threshold of $1 - \hat{q} = 0.30$, the prediction set would be {A, B}. The sink options are ruled out, but the robot still can't tell which bowl you meant.
+
+#### Step 3: Asking for Help
 
 - If the set contains exactly one option, the robot executes it.
-- If the set contains more than one option, the robot asks the human to choose.
+- If the set contains more than one option, the robot asks the human to choose. The options are turned into a plain-language question, like "Should I put the plastic bowl or the metal bowl in the microwave?" If the right answer is E, the human describes the correct action instead.
+
+Assuming the human always answers correctly, the robot can only fail when the correct option is missing from the set. That happens at most $\epsilon$ of the time, so the task success rate is at least $1 - \epsilon$. In other words, the coverage guarantee from conformal prediction turns into a task success guarantee.
+
+#### Multi-Step Plans
+
+Most tasks take more than one step, which breaks a key assumption of conformal prediction: that every data point is independent. In a multi-step plan, what the robot sees at step $t$ depends on what it did at earlier steps.
+
+KnowNo handles this by calibrating on whole plans instead of single steps. A plan with steps $t = 0, \dots, T-1$ gets the score of its weakest step:
+
+$$
+\hat{f}(\bar{x})_{\bar{y}} = \min_{t} \hat{f}(x^t)_{y^t}
+$$
+
+where $\bar{x}$ and $\bar{y}$ are the sequences of prompts and correct labels. Calibration runs on these sequence scores and produces a single threshold $\hat{q}$. At test time the robot can't see future steps, so it builds a prediction set at each step using that same $\hat{q}$. The authors prove that these step-by-step sets contain exactly the same plans as a set built from the whole sequence at once. So if the robot asks for help whenever any step's set has more than one option, the $1 - \epsilon$ guarantee covers the entire task rather than each step separately.
+
+The paper also extends this to cases with more than one acceptable option, like "bring me a soda" when there is both a Coke and a Sprite on the table. In that setting, the guarantee is that the set contains at least one acceptable option.
 
 ### Experimental Setup
 
