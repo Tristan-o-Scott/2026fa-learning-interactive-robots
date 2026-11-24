@@ -17,18 +17,17 @@ toc:
   - name: "Introduction"
   - name: "Diff-DAgger"
     subsections:
-    - name: "Motivation"
-    - name: "Background"
+    - name: "Motivation and Background"
     - name: "Method"
     - name: "Results"
     - name: "Limitations"
     - name: "Takeaways"
   - name: "KnowNo"
     subsections:
-    - name: "Method"
+    - name: "How KnowNo Works"
     - name: "Experimental Setup"
     - name: "Baselines"
-    - name: "Results"
+    - name: "KnowNo Results"
     - name: "Conclusions"
   - name: "Student Q&A"
 ---
@@ -44,11 +43,11 @@ Imagine using behavioral cloning to teach a robot how to perform basic household
 
 Dataset aggregation (DAgger) aims to prevent catastrophes like these. The idea is to make the supervised training process more robust by allowing it to fill in its own gaps. After initial training, the robot is allowed to move in a simulated or real environment that can progress out of the training distribution. When the environment drifts far enough away from what the robot has been trained for, control is given to an expert -- typically a human demonstrator -- who steps in and corrects the action sequence. Then, the robot is re-trained with the new gaps filled in, and the process repeats. 
 
-While this technique works quite well in situations where reinforcement learning is infeasible (at least initially), a significant challenging is choosing when intervention should occur. As discussed in the following section, multimodal action distributions can make this process especially difficult. <d-cite key="lee_diff-dagger_2025"></d-cite> note that modern robot policies often use diffusion models to produce actions, from which they extrapolate an improved method for choosing when to intervene, which they call Diff-DAgger.
+While this technique works quite well in situations where reinforcement learning is infeasible (at least initially), a significant challenge is choosing when intervention should occur. As discussed in the following section, multimodal action distributions can make this process especially difficult. <d-cite key="lee_diff-dagger_2025"></d-cite> note that modern robot policies often use diffusion models to produce actions, from which they extrapolate an improved method for choosing when to intervene, which they call Diff-DAgger.
 
-### Motivation & Background
+### Motivation and Background
 
-The key issue that caused the embarassing investor demo in the introduction is called "covariate shift," when actions taken by the agent result in shifted input variable distributions <d-cite key="ross_reduction_2011"></d-cite>. Here is a summary of different DAgger methods:
+The key issue that caused the embarrassing investor demo in the introduction is called "covariate shift," when actions taken by the agent result in shifted input variable distributions <d-cite key="ross_reduction_2011"></d-cite>. Here is a summary of different DAgger methods:
 
 | Method | Description |
 |---|---|
@@ -60,22 +59,23 @@ The key issue that caused the embarassing investor demo in the introduction is c
 {% include figure.liquid 
    path="assets/img/2026-11-16-human-in-the-loop-systems/distribution-modes.png" 
    class="img-fluid rounded z-depth-1" 
-   caption="Figure X: Demonstrations from start to goal. Most states are in-distribution and uni-modal (red/orange). At the fork, valid demonstrations split between the upper and lower paths, creating a multi-modal region (green). States away from the demonstrations are out-of-distribution (blue)." 
+   caption="Figure 1: Demonstrations from start to goal. Most states are in-distribution and uni-modal (red/orange). At the fork, valid demonstrations split between the upper and lower paths, creating a multi-modal region (green). States away from the demonstrations are out-of-distribution (blue)." 
 %}
 
-Figure X illustrates a key problem with Ensemble DAgger. At the multi-modal region where the agent must traverse the circle, two very different actions are possible: the agent may turn left or right. However, because different policies can choose either option, this would register as uncertainty, and the expert would be asked to intervene regardless of whether or not the robot was OOD. 
+Figure 1 illustrates a key problem with Ensemble DAgger. At the multi-modal region where the agent must traverse the circle, two very different actions are possible: the agent may turn left or right. However, because different policies can choose either option, this would register as uncertainty, and the expert would be asked to intervene regardless of whether or not the robot was OOD. 
 
 <d-cite key="lee_diff-dagger_2025"></d-cite> proposes a new method for deciding when interventions should happen that uses a metric inherent to a popular policy architecture: diffusion models. Denoising Diffusion Probabilistic Models (DDPMs) work by iteratively producing a sequence of actions from noise. Its loss looks like 
 
 $$\mathcal{L}_\pi(o,a,\epsilon,t)=\left\|f(\epsilon,a,t)-f_\theta\!\left(o,\sqrt{\alpha_t}\,a+\sqrt{1-\alpha_t}\,\epsilon,\,t\right)\right\|^2,$$
 
-where $\mathcal{L}_\pi(o,a,\epsilon,t)$ represents the loss for a policy $\pi$ given observations $o$, an action label $a$, some noise $\epsilon$, and noising step $t$. The right-hand side simply calculates the distance of the diffusion model $f_\theta$'s predicted action from the action label. The intuition of Diff-DAgger is that this loss function presents a better way to proxy uncertainty than asking multiple policies for potentially conflicting answers. Instead, the authors propose that the agent attempt to reconstruct its own action, the loss of which can provide a less-conflicting uncertainty estimate. 
+where $\mathcal{L}_\pi(o,a,\epsilon,t)$ represents the loss for a policy $\pi$ given observations $o$, an action label $a$, some noise $\epsilon$, and noising step $t$. The right-hand side simply calculates the distance between the diffusion model $f_\theta$'s prediction and the training target $f(\epsilon,a,t)$ (the noise, the clean action, or a "velocity," depending on how the model is trained) for the noised action label. The intuition of Diff-DAgger is that this loss function presents a better way to proxy uncertainty than asking multiple policies for potentially conflicting answers. Instead, the authors propose that the agent attempt to reconstruct its own action, the loss of which can provide a less-conflicting uncertainty estimate. 
 
 ### Method
 The authors of Diff-DAgger use diffusion loss to estimate uncertainty. In order to compute loss in unseen states, they use the following estimation:
+
 $$\mathcal{L}(o, a, \pi) = \mathbb{E}_{\epsilon \sim \mathcal{N}(0, I),\; t \sim \mu(1, T)} \, \mathcal{L}_\pi(o, a, \epsilon, t).$$
 
-In fact, this simply reuses the loss equation from earlier. The key idea is that the input action $a$ is now the action already generated by the model. If $\mathcal{L}(o, a, \pi)$ gives a loss higher than the $\alpha$ percentile observed in training for $K$ consecutive time steps, the robot will trigger an intervention. Because the decision originally generated by the policy is preserved, the noised-input should already be on the slope of a local extrema in a multi-modal decision point scenario. This has an additional benefit over ensemble-DAgger: instead of running multiple policies at once, only one action needs to be computed at each time step. 
+In fact, this simply reuses the loss equation from earlier. The key idea is that the input action $a$ is now the action already generated by the model. If $\mathcal{L}(o, a, \pi)$ gives a loss higher than the $\alpha$ percentile observed in training for $K$ consecutive time steps, the robot will trigger an intervention. Because the action being scored is the one the policy itself generated, it already sits near one of the learned modes, so at a multi-modal decision point the loss stays low instead of being inflated by the other valid mode. This has an additional benefit over ensemble-DAgger: instead of running multiple policies at once, only one action needs to be computed at each time step. 
 
 ### Results
 
@@ -88,7 +88,7 @@ Diff-DAgger does this with one trick. A diffusion policy is trained to predict n
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/fig1_overview.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 1 (paper Fig. 1): Overview of Diff-DAgger. (a) A diffusion policy is trained on expert data. (b) During rollout, the robot generates an action, computes the diffusion loss on it, and continues only if the loss is low. Otherwise the expert takes over."
+   caption="Figure 2 (paper Fig. 1): Overview of Diff-DAgger. (a) A diffusion policy is trained on expert data. (b) During rollout, the robot generates an action, computes the diffusion loss on it, and continues only if the loss is low. Otherwise the expert takes over."
 %}
 
 The loss comes from the standard diffusion policy objective:
@@ -115,7 +115,7 @@ $$
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/decision_rule.svg"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 2: The query rule in action (our own diagram). One noisy spike is ignored. Two high-loss steps in a row, with K = 2, hand control to the expert."
+   caption="Figure 3: The query rule in action (our own diagram). One noisy spike is ignored. Two high-loss steps in a row, with K = 2, hand control to the expert."
 %}
 
 The experiments ask three questions:
@@ -124,14 +124,14 @@ The experiments ask three questions:
 2. **RQ2.** With the same number of expert interventions, does Diff-DAgger beat existing methods?
 3. **RQ3.** Does it cut the wall-clock time of each DAgger iteration?
 
-### Tasks and Experts
+#### Tasks and Experts
 
 There are three simulated tasks (built on ManiSkill) and two real-world tasks.
 
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/fig3_tasks.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 3 (paper Fig. 3): The five tasks. Top: stacking, pushing, and plugging in simulation. Bottom: stacking and loading on a real Franka robot."
+   caption="Figure 4 (paper Fig. 3): The five tasks. Top: stacking, pushing, and plugging in simulation. Bottom: stacking and loading on a real Franka robot."
 %}
 
 - **Stacking.** Pick up a red cube and place it on a green cube. A basic perception and manipulation test.
@@ -162,7 +162,7 @@ The real-world experts are humans teleoperating a robot with a VR controller.
 - **State-based.** Robot joint positions, end-effector pose, and the true object poses.
 - **Image-based.** An R3M ResNet18 encoder with spatial softmax, plus proprioception. Random crop augmentation is used.
 
-The observation horizon is set to one to keep batches small. The diffusion model uses V-objective prediction (more on this in the discussion).
+The observation horizon is set to one to keep batches small. The diffusion model uses V-objective prediction (see "Choosing the Prediction Target" below).
 
 | Task | Action space | Initial demos | Final demos | New demos per update | $\alpha$ | $K$ | $N_b$ |
 |---|---|---|---|---|---|---|---|
@@ -190,7 +190,7 @@ Before the robot tasks, the paper uses a 2D navigation problem. An agent goes fr
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/fig2_toy_example.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 4 (paper Fig. 2): (a) The toy problem. Red/orange dots are the two modes. Green marks the fork where the paths split. The dark blue area is out-of-distribution. (b) Left: action standard deviation across the ensemble. Right: diffusion loss. Both measured over 100 runs."
+   caption="Figure 5 (paper Fig. 2): (a) The toy problem. Red/orange dots are the two modes. Green marks the fork where the paths split. The dark blue area is out-of-distribution. (b) Left: action standard deviation across the ensemble. Right: diffusion loss. Both measured over 100 runs."
 %}
 
 Look at the left chart. The ensemble's disagreement is highest at the **fork**, which is a normal, in-distribution spot. It is even a bit higher than in the truly out-of-distribution region. Each policy is confident, they just pick different paths. The ensemble reads that as uncertainty.
@@ -204,7 +204,7 @@ For each task, the policy is trained on enough demos to land near a **50% succes
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/confusion_matrix.svg"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 5: How query decisions line up with outcomes (our own diagram)."
+   caption="Figure 6: How query decisions line up with outcomes (our own diagram)."
 %}
 We then report standard scores:
 
@@ -286,9 +286,9 @@ Yes. The Ensemble approach pays three costs that Diff-DAgger avoids:
 3. **Inference.** Five forward passes versus one.
 
 {% include figure.liquid
-   path="assets/img/2026-11-18-diff-dagger/fig4_wallclock.png"
+   path="assets/img/2026-11-16-human-in-the-loop-systems/fig4_wallclock.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 6 (paper Fig. 4): Average duration of training, threshold setting, inference, and total iteration. Measured on the final DAgger iteration of the visuomotor pushing task, on one A100 40 GB GPU."
+   caption="Figure 7 (paper Fig. 4): Average duration of training, threshold setting, inference, and total iteration. Measured on the final DAgger iteration of the visuomotor pushing task, on one A100 40 GB GPU."
 %}
 
 | Speedup of Diff-DAgger over | Training | Threshold setting | Inference |
@@ -315,7 +315,7 @@ Diff-DAgger has far fewer false negatives across tasks. That is the better trade
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/fig5_query_modes.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 7 (paper Fig. 5): Query behavior on plugging. Black = robot rollout, red = robot queries, green = expert intervenes, magenta = automatic timeout intervention."
+   caption="Figure 8 (paper Fig. 5): Query behavior on plugging. Black = robot rollout, red = robot queries, green = expert intervenes, magenta = automatic timeout intervention."
 %}
 
 - **Diff-DAgger (top).** The charger starts to slip, and the robot asks for help at 9.1 s. The expert steps in and the episode succeeds.
@@ -337,10 +337,8 @@ Diffusion models can be trained to predict different targets: the noise $\epsilo
 {% include figure.liquid
    path="assets/img/2026-11-16-human-in-the-loop-systems/fig6_recovery.png"
    class="img-fluid rounded z-depth-1"
-   caption="Figure 8 (paper Fig. 6): A policy trained on Diff-DAgger data. After a failed first attempt, it tries again and stacks the cube. Top: simulation. Bottom: real robot."
+   caption="Figure 9 (paper Fig. 6): A policy trained on Diff-DAgger data. After a failed first attempt, it tries again and stacks the cube. Top: simulation. Bottom: real robot."
 %}
-
-![Test image](../assets/img/2026-11-16-human-in-the-loop-systems/fig1_overview.png)
 
 Policies trained on Diff-DAgger data sometimes recover from their own mistakes. The robot misaligns the cube, fails, tries again, and succeeds. This kind of behavior usually shows up only if someone carefully plans recoveries into offline data. Here it appears naturally. The authors link it to the policy-performance gain over offline training. The mechanism makes sense: the expert steps in right at the moments of trouble, so the dataset ends up full of "how to fix it" examples.
 
@@ -374,7 +372,7 @@ The core idea is simple. A model trained to denoise expert actions is naturally 
 ## KnowNo: Robots That Ask For Help <d-cite key="ren_robots_2023"></d-cite> {#knowno}
 
 
-### Method
+### How KnowNo Works
 
 KnowNo prompts the LLM to generate candidate next steps, formatted as multiple-choice question answering (MCQA) with options A–D and an added "E: an option not listed here" choice. The LLM's next-token probability for each letter serves as its confidence in that option.
 
@@ -406,7 +404,7 @@ KnowNo was primarily evaluated with PaLM-2L as the base planner, and compared ag
 | **Binary** | Asks the LLM to say whether it is certain or uncertain |
 | **No Help** | Always executes the top-scoring option |
 
-### Results
+### KnowNo Results
 
 1. **Reliable task success guarantees.** In simulation, with a target success level of 85% ($\epsilon = 0.15$), KnowNo had the smallest deviation from the target across all three ambiguity settings. The uncalibrated baselines either missed the target or gave the user no way to set one.
 2. **Minimizing human help rate.** For the same success level, KnowNo asked for help less often than the baselines. The gap grew as instructions became more vague. Ensemble Set also performed well, but needed more inference time.
@@ -419,17 +417,17 @@ Conformal prediction paired with MCQA allows operators to tune a statistical gua
 
 The key limitation is that the guarantee currently assumes:
 
-- 1. the environment's scene state is accurately parsed into text.
-- 2. low-level robotic controllers execute the selected primitive without failure.
-- 3. a clean environment, that is, the method does not account for human error, so a wrong answer from the human breaks the guarantee.
+1. The environment's scene state is accurately parsed into text.
+2. Low-level robotic controllers execute the selected primitive without failure.
+3. The human always answers correctly. The method does not account for human error, so a wrong answer from the human breaks the guarantee.
 
 In addition, calibration requires a labeled dataset of scenarios. The authors used 400 examples, which took about 4 hours to label in the multi-step setting, and this must be repeated for each new environment.
 
 ---
 
-## Student Q&A
+## Student Q&A {#student-q-a}
 
-### KnowNo
+### KnowNo {#qa-knowno}
 
 **Q: How can robots learn from past clarifications to reduce repeated questions and adapt to individual users?**
 
@@ -446,7 +444,7 @@ A: Perhaps another LLM could be used to help resolve uncertainty. The 2 models c
 A: Several studies mention how we can dynamically change the calibration set for the application.
 <br><br>
 
-### Diff-DAgger
+### Diff-DAgger {#qa-diff-dagger}
 
 **Q: If diffusion loss measures how well an action matches the learned distribution rather than whether the action will succeed, is diffusion loss alone sufficient for reliable failure prediction?**
 
