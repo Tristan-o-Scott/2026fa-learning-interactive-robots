@@ -366,16 +366,41 @@ The core idea is simple. A model trained to denoise expert actions is naturally 
 
 ## Student Q&A
 
-<!-- TODO: group questions under ### topic headings, as in the Foundation Models for Language report -->
+### KnowNo
 
-### Topic
+**Q: How can robots learn from past clarifications to reduce repeated questions and adapt to individual users?**
 
-**Q: Question?**
-
-A: Answer.
+A: Maybe we can create a memory bank of human clarifications. The next time a similar situation is faced, we can retrieve the past record from the memory bank, to reduce the frequency of asking the same question in the future.
 <br><br>
 
+**Q: What role could another LLM play in helping robots resolve uncertainty, and when would human clarification still be necessary?**
 
+A: Perhaps another LLM could be used to help resolve uncertainty. The 2 models can discuss with each other, and if an agreement can't be reached, they can ask a human for help. This may make the decision process slower, and may ultimately end up just following the decision of the stronger LLM. If the LLMs are about equal, then the additional LLM does not really help.
+<br><br>
+
+**Q: How can KnowNo be adapted when the calibration set differs in distribution from the deployment environment?**
+
+A: Several studies mention how we can dynamically change the calibration set for the application.
+<br><br>
+
+### Diff-DAgger
+
+**Q: If diffusion loss measures how well an action matches the learned distribution rather than whether the action will succeed, is diffusion loss alone sufficient for reliable failure prediction?**
+
+A: No, because diffusion models just measure how an action matches the distribution of the dataset. It measures the uncertainty of the robot. However, if an action is not in the distribution, that does not necessarily mean it failed the task.
+<br><br>
+
+**Q: What types of expert interventions would be most valuable for improving a robot's policy?**
+
+A: Motion planner interventions may be more optimal than human expert interventions, but human expert interventions may be more diverse. There's a tradeoff between the two. A motion planner can help you find the shortest trajectory, but a human expert can help reach out-of-distribution states (helping the policy to be more generalized). This paper has humans intervene when the policy is uncertain (the action hasn't been executed yet), but it is also important to learn how to recover from failure. If demonstration data only includes successful trajectories, the robot doesn't learn how to recover from failure. However, failing on purpose can also cause cost and safety problems. It is an interesting problem to consider whether to intervene before or after failure.
+<br><br>
+
+### Model Uncertainty
+
+**Q: What does it mean for a robot to be uncertain? How is uncertainty different from the risk of task failure?**
+
+A: Uncertainty can mean a lot of things, such as unsafe or unwanted actions. The definition of uncertainty depends on the situation or environment the robot is in.
+<br><br>
 
 ### Sources
 
